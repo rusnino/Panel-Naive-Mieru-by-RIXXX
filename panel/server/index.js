@@ -28,7 +28,6 @@ const helmet         = require('helmet');
 const morgan         = require('morgan');
 const rateLimit      = require('express-rate-limit');
 const bcrypt         = require('bcryptjs');
-const { v4: uuidv4 } = require('uuid');
 const cron           = require('node-cron');
 const http           = require('http');
 const { WebSocketServer } = require('ws');
@@ -2617,7 +2616,7 @@ app.post('/api/users', requireAuth, async (req, res) => {
     await Promise.resolve();
     const now  = new Date().toISOString();
     const user = {
-      id:        uuidv4(),
+      id:        crypto.randomUUID(),
       // Email is optional: store NULL (not '') so the UNIQUE constraint allows
       // multiple users without an email.
       email:     normEmail,
@@ -4319,7 +4318,7 @@ app.post('/api/federation/provision', fedLimiter, (req, res) => {
     const password  = crypto.randomBytes(24).toString('hex');   // random per node
     const sub_token = crypto.randomBytes(16).toString('hex');
     const user = {
-      id:        uuidv4(),
+      id:        crypto.randomUUID(),
       email,
       username,
       passHash:  bcrypt.hashSync(password, 12),
