@@ -54,9 +54,20 @@
 git clone https://github.com/cwash797-cmd/Panel-Naive-Mieru-by-RIXXX.git
 cd Panel-Naive-Mieru-by-RIXXX
 
-# 2. Run the installer as root
+# 2. Run the shared installer as root
 sudo bash install.sh
 ```
+
+Before that step, run the bootstrapper **on Debian 11 only**:
+
+```bash
+sudo bash bootstrap-debian11.sh
+```
+
+> Debian 11 has reached the end of official security support. The bootstrapper
+> switches APT to the signed but frozen 2026-08-31 snapshot and configures
+> `better-sqlite3` to build on the VPS. Debian 12 or newer is recommended for
+> new installations.
 
 The wizard will prompt you for:
 - Language (Russian / English) — **first question**
@@ -348,7 +359,7 @@ ufw status
 ## 📋 Tech Stack
 
 - **Installer:** Bash (Ubuntu 20.04–24.04, Debian 11–12)
-- **Panel:** Node.js 20 LTS + Express + better-sqlite3 + WebSocket
+- **Panel:** Node.js 24 LTS + Express + better-sqlite3 + WebSocket
 - **Process manager:** PM2
 - **NaiveProxy:** caddy-naive (Caddy + forward_proxy plugin)
 - **Mieru:** mita (managed via `mita apply config`)
