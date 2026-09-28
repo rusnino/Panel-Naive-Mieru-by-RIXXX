@@ -1,6 +1,6 @@
 /**
  * Panel Naive + Mieru by RIXXX — Express backend  v1.2.6
- * Node.js 20 LTS + Express + better-sqlite3 + WebSocket + node-cron
+ * Node.js 24 LTS + Express + better-sqlite3 + WebSocket + node-cron
  *
  * v1.2.3: Migrated from standalone naive binary to caddy-forwardproxy-naive.
  *   buildCaddyfile(cfg, users) — rebuilds /etc/caddy-naive/Caddyfile atomically
@@ -1729,6 +1729,12 @@ app.use(morgan('combined', {
 // this only matters for POST /api/backup/import.
 app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: false }));
+// Express 5 leaves req.body undefined when the request has no parsed body;
+// keep the Express 4 behavior expected by existing API handlers.
+app.use((req, _res, next) => {
+  if (req.body === undefined) req.body = {};
+  next();
+});
 
 // Session
 let sessionSecret;
@@ -5501,7 +5507,7 @@ cron.schedule('* * * * *', () => {
 });
 
 // ── SPA catch-all ─────────────────────────────────────────────────────────────
-app.get('*', (_req, res) => res.sendFile(path.join(__dirname, '../public/index.html')));
+app.get('/{*splat}', (_req, res) => res.sendFile(path.join(__dirname, '../public/index.html')));
 
 // ── Global error handler (Bug 149) ───────────────────────────────────────────
 // Last-resort safety net: any error thrown synchronously inside a route (e.g. a
