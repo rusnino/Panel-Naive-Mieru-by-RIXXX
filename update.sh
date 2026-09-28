@@ -1528,8 +1528,8 @@ update_mieru() {
 #     clear message and left a partial copy;
 #   - the version bump happened even on a partial run, so the next `-y` run saw
 #     "already up-to-date" and never re-copied the panel files.
-# Now: clone (or fall back to the local checkout), copy ALL panel files, run
-# npm install non-fatally, restart PM2, and verify a known sentinel landed.
+# Now: clone (or fall back to the local checkout), ensure native build tools,
+# copy ALL panel files, install dependencies, restart PM2, and verify a sentinel.
 update_panel() {
   log_step "Updating web panel"
   $DRY_RUN && { log_dry "Would pull latest panel from $REPO_URL"; return; }
@@ -1556,6 +1556,18 @@ update_panel() {
 
   # repo_root is the dir that CONTAINS panel/ (holds VERSION + deploy scripts).
   local repo_root; repo_root="$(dirname "$src")"
+
+  # better-sqlite3 is a native addon. Existing installs from before this update
+  # may not have a compiler toolchain, so prepare it before stopping the panel
+  # or switching Node.js. Fresh installs already get these packages in
+  # install_deps().
+  if ! command -v make >/dev/null 2>&1 || \
+     ! command -v g++ >/dev/null 2>&1 || \
+     ! command -v python3 >/dev/null 2>&1; then
+    log_step "Installing native module build prerequisites"
+    DEBIAN_FRONTEND=noninteractive apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential python3
+  fi
 
   pm2 stop panel-naive-mieru 2>/dev/null || true
 
@@ -1614,7 +1626,21 @@ update_panel() {
       if [[ -d "$deps_backup" ]]; then
         mv "$deps_backup" "$PANEL_DIR/node_modules"
       fi
-      log_warn "npm ci failed — restored the previous node_modules when available"
+      # Node.js was upgraded above, so native addons from the restored tree may
+      # still target the old Node ABI. Rebuild SQLite before the panel restarts.
+      local sqlite_dir="$PANEL_DIR/node_modules/better-sqlite3"
+      if [[ -d "$sqlite_dir" ]]; then
+        if ( cd "$sqlite_dir" && npm run build-release --silent ); then
+          rm -f "$sqlite_dir/prebuilds/linux-x64.node"
+          node -e "require('$sqlite_dir')" \
+            || die "Restored better-sqlite3 cannot load under the installed Node.js runtime"
+          log_warn "npm ci failed — previous packages restored; rebuilt better-sqlite3 for the current Node.js runtime"
+        else
+          die "npm ci failed and the restored better-sqlite3 could not be rebuilt; panel will not restart"
+        fi
+      else
+        die "npm ci failed and no previous node_modules/better-sqlite3 is available; panel will not restart"
+      fi
     fi
   else
     ( cd "$PANEL_DIR" && npm install --omit=dev --silent ) \
