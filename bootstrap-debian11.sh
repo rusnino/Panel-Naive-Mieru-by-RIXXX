@@ -7,7 +7,7 @@ readonly SNAPSHOT="20260831T235959Z"
 readonly MANAGED_HEADER="# Managed by Panel Naive + Mieru Debian 11 bootstrap"
 readonly SOURCE_LIST="/etc/apt/sources.list"
 readonly BACKUP_DIR="/var/backups/rixxx-debian11-bootstrap"
-readonly BUILD_MARKER="/var/lib/rixxx-panel/debian11-build-native-from-source"
+readonly BUILD_MARKER="/var/lib/rixxx-panel/build-native-from-source"
 
 log() { printf '[bootstrap-debian11] %s\n' "$*"; }
 die() { log "ERROR: $*" >&2; exit 1; }

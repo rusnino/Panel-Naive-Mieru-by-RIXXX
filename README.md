@@ -58,16 +58,22 @@ cd Panel-Naive-Mieru-by-RIXXX
 sudo bash install.sh
 ```
 
-Перед этим шагом **только на Debian 11** выполните bootstrapper:
+Перед этим шагом **только на Debian 11 или Ubuntu 20.04** выполните
+соответствующий bootstrapper:
 
 ```bash
-sudo bash bootstrap-debian11.sh
+sudo bash bootstrap-debian11.sh   # Debian 11
+sudo bash bootstrap-ubuntu20.sh   # Ubuntu 20.04
 ```
 
-> Debian 11 завершил официальный период обновлений безопасности. Bootstrapper
-> переключает APT на подписанный, но замороженный snapshot от 2026-08-31 и
-> включает сборку `better-sqlite3` на VPS. Для новых установок предпочтителен
-> Debian 12 или новее.
+> Debian 11 завершил официальный период обновлений безопасности. Его
+> bootstrapper переключает APT на подписанный, но замороженный snapshot от
+> 2026-08-31. Оба bootstrapper'а включают сборку `better-sqlite3` из
+> исходников на VPS — её предсобранный Linux-бинарник требует более новую
+> glibc (`GLIBC_2.33`), чем есть в обеих ОС, а на Ubuntu 20.04 штатный
+> компилятор (g++ 9) вдобавок не умеет её собирать, поэтому ubuntu-bootstrapper
+> ещё и ставит и переключает систему на g++-10. Для новых установок
+> предпочтителен Debian 12 или Ubuntu 22.04+.
 
 Мастер установки запросит:
 - Язык (Русский / English) — **первый вопрос**

@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
-# Rebuild better-sqlite3 for Debian 11's glibc when the npm package bundles a
-# binary built against a newer glibc. Called after npm install by install.sh and
-# update.sh; harmless on all other systems.
+# Rebuild better-sqlite3 when the host's glibc predates the version the npm
+# package's bundled prebuilt binary needs (currently Debian 11 and Ubuntu
+# 20.04; see bootstrap-debian11.sh and bootstrap-ubuntu20.sh). Called after
+# npm install by install.sh and update.sh; harmless on all other systems,
+# since the marker file below is only written by those bootstrappers.
 set -euo pipefail
 
-readonly BUILD_MARKER="/var/lib/rixxx-panel/debian11-build-native-from-source"
+readonly BUILD_MARKER="/var/lib/rixxx-panel/build-native-from-source"
 readonly SQLITE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../node_modules/better-sqlite3" 2>/dev/null && pwd || true)"
 readonly PREBUILT="${SQLITE_DIR}/prebuilds/linux-x64.node"
 
@@ -15,7 +17,7 @@ readonly PREBUILT="${SQLITE_DIR}/prebuilds/linux-x64.node"
 }
 [[ -f "$PREBUILT" ]] || exit 0
 
-echo "[native-sqlite] Rebuilding better-sqlite3 against Debian 11's glibc"
+echo "[native-sqlite] Rebuilding better-sqlite3 against this host's glibc"
 (cd "$SQLITE_DIR" && npm run build-release --silent)
 rm -f "$PREBUILT"
 echo "[native-sqlite] Using the locally compiled better-sqlite3 binary"

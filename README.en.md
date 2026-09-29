@@ -58,16 +58,21 @@ cd Panel-Naive-Mieru-by-RIXXX
 sudo bash install.sh
 ```
 
-Before that step, run the bootstrapper **on Debian 11 only**:
+Before that step, run the matching bootstrapper **on Debian 11 or Ubuntu
+20.04 only**:
 
 ```bash
-sudo bash bootstrap-debian11.sh
+sudo bash bootstrap-debian11.sh   # Debian 11
+sudo bash bootstrap-ubuntu20.sh   # Ubuntu 20.04
 ```
 
-> Debian 11 has reached the end of official security support. The bootstrapper
-> switches APT to the signed but frozen 2026-08-31 snapshot and configures
-> `better-sqlite3` to build on the VPS. Debian 12 or newer is recommended for
-> new installations.
+> Debian 11 has reached the end of official security support. Its bootstrapper
+> switches APT to the signed but frozen 2026-08-31 snapshot. Both bootstrappers
+> configure `better-sqlite3` to build from source on the VPS — its prebuilt
+> Linux binary needs a newer glibc (`GLIBC_2.33`) than either OS ships, and on
+> Ubuntu 20.04 the stock compiler (g++ 9) can't build it either, so the
+> Ubuntu bootstrapper also installs and switches to g++-10. Debian 12 or
+> Ubuntu 22.04+ is recommended for new installations.
 
 The wizard will prompt you for:
 - Language (Russian / English) — **first question**

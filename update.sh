@@ -1647,9 +1647,9 @@ update_panel() {
       || ( cd "$PANEL_DIR" && npm install --production --silent ) \
       || log_warn "npm install reported a problem — continuing (deps may already be present)"
   fi
-  if [[ -f /var/lib/rixxx-panel/debian11-build-native-from-source ]]; then
+  if [[ -f /var/lib/rixxx-panel/build-native-from-source ]]; then
     bash "$PANEL_DIR/scripts/build-native-sqlite.sh" \
-      || die "Could not rebuild better-sqlite3 for Debian 11; panel was not restarted"
+      || die "Could not rebuild better-sqlite3 for this host's glibc; panel was not restarted"
   else
     bash "$PANEL_DIR/scripts/build-native-sqlite.sh" \
       || log_warn "Could not rebuild better-sqlite3 — inspect npm/g++ output"
