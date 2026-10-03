@@ -141,7 +141,10 @@ ok(!threw, 'a garbage bonus link never throws (soft-skip)');
 
 // ── buildSingboxConfig: bonus links reach sing-box clients (source contract) ──
 console.log('\n[5] source contract — bonus links flow into the sing-box JSON path');
-ok(/const bonusUrls = enabledBonusUrls\(user\);/.test(src),
+// pr-domain-list-routing (feat-split-routing) wraps this in a protocol-scoped
+// guard — `onlyProtocol ? [] : enabledBonusUrls(user)` — so a ?protocol=
+// subscription never carries bonus links. Match that call regardless of guard.
+ok(/const bonusUrls = .*enabledBonusUrls\(user\)/.test(src),
    'buildSingboxConfig iterates the user\'s enabled bonus links');
 ok(/bonusUrlToSingboxOutbound\(bonusUrls\[i\]/.test(src),
    'each bonus link is converted via bonusUrlToSingboxOutbound()');
