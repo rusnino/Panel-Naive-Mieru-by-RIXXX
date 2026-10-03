@@ -291,6 +291,8 @@ function handleDelegatedClick(e) {
     case 'change-naive-port':    changeNaivePort(); break;
     case 'change-mieru-ports':   changeMieruPorts(); break;
     case 'save-sub-base-url':    saveSubBaseUrl(); break;
+    case 'save-split-routing':   saveSplitRouting(); break;
+    case 'refresh-routing-lists': refreshRoutingLists(); break;
     case 'save-fake-site-url':   saveFakeSiteUrl(); break;
     case 'save-server-flag':     saveServerFlag(); break;
 
@@ -749,6 +751,7 @@ function openAddUser() {
   el('u-password').value   = '';
   el('u-expiry').value     = '';
   el('u-quota').value      = '0';
+  el('u-domain-routing').checked = false;
   el('p-naive').checked    = true;
   el('p-mieru').checked    = true;
   if (el('p-hy2')) el('p-hy2').checked = false;
@@ -785,6 +788,7 @@ function openEditUser(id) {
   el('u-password').value = '';
   el('u-expiry').value   = user.expiry ? user.expiry.slice(0, 16) : '';
   el('u-quota').value    = user.quotaMB || 0;
+  el('u-domain-routing').checked = user.domainRouting === true;
   el('p-naive').checked  = protocols.includes('naive');
   el('p-mieru').checked  = protocols.includes('mieru');
   applyHy2Gate();
@@ -823,7 +827,10 @@ async function saveUser() {
   if (password && password.length < 8) return showUserError(t('users.passwordTooShort'));
   if (!protocols.length)    return showUserError(t('users.protocolRequired'));
 
-  const body = { email, username, expiry, protocols, quotaMB };
+  const body = {
+    email, username, expiry, protocols, quotaMB,
+    domainRouting: !!el('u-domain-routing')?.checked,
+  };
   if (password) body.password = password;
 
   // v1.2.5: disabled-button + spinner pattern
@@ -1014,6 +1021,14 @@ function openConfigDownload(id) {
   const uProtos = user ? (Array.isArray(user.protocols) ? user.protocols : safeParseJSON(user.protocols, [])) : [];
   const hy2Btn = el('btn-dl-hy2-link');
   if (hy2Btn) hy2Btn.classList.toggle('hidden', !(state.hy2Installed && uProtos.includes('hy2')));
+  const subMode = el('sub-protocol-mode');
+  if (subMode) {
+    for (const option of subMode.options) {
+      option.disabled = option.value !== 'all' &&
+        (!uProtos.includes(option.value) || (option.value === 'hy2' && !state.hy2Installed));
+    }
+    subMode.value = 'all';
+  }
   // P3: no password prompt — the server uses the user's stored password.
   // Auto-load the naive link + QR right away.
   loadNaiveLink();
@@ -1233,8 +1248,10 @@ async function downloadUniversalConfig() {
 // link box + QR as the other buttons.
 async function downloadSubLink() {
   try {
+    const protocol = el('sub-protocol-mode') ? el('sub-protocol-mode').value : 'all';
+    const q = protocol && protocol !== 'all' ? `?protocol=${encodeURIComponent(protocol)}` : '';
     const data = await api('GET',
-      `/api/users/${state.selectedUserId}/sub-link`);
+      `/api/users/${state.selectedUserId}/sub-link${q}`);
 
     el('naive-link-box').textContent = data.link;
     el('naive-link-box').classList.remove('hidden');
@@ -1242,6 +1259,90 @@ async function downloadSubLink() {
     toast(t('config.subLinkCopied') || 'Sub-ссылка скопирована', 'success');
     generateQR(data.link);
   } catch (err) { toast(err.message, 'error'); }
+}
+
+async function loadRoutingListsStatus() {
+  const box = el('split-routing-lists');
+  if (!box) return;
+  try {
+    const data = await api('GET', '/api/routing-lists/status');
+    const selected = new Set(state.config?.splitRouting?.lists || []);
+    box.innerHTML = (data.lists || []).map(list => `
+      <label style="display:flex;align-items:flex-start;gap:8px;padding:8px;border:1px solid var(--border);border-radius:8px">
+        <input type="checkbox" data-routing-list="${esc(list.id)}" ${selected.has(list.id) ? 'checked' : ''} />
+        <span style="display:flex;flex-direction:column;gap:3px">
+          <strong>${esc(list.label)}</strong>
+          <small style="color:var(--text-muted)">${esc(list.description)}</small>
+          <small style="color:${list.available ? 'var(--green)' : 'var(--text-muted)'}">${list.available
+            ? `${Number(list.count).toLocaleString()} · ${esc(list.fetchedAt || '')}`
+            : esc(t('settings.splitRoutingNotCached') || 'Not cached yet')}</small>
+          ${list.lastError ? `<small style="color:var(--red)">${esc(list.lastError)}</small>` : ''}
+        </span>
+      </label>`).join('');
+    renderRoutingListSummary(data);
+  } catch (err) {
+    showMsg('split-routing-status', err.message || 'Failed to load list cache status', false);
+  }
+}
+
+function renderRoutingListSummary(data) {
+  const selected = (data.lists || []).filter(list => list.selected);
+  const ready = selected.filter(list => list.available).length;
+  const missing = selected.length - ready;
+  let message = (t('settings.splitRoutingCacheSummary') || 'Cached lists: {ready}/{selected}')
+    .replace('{ready}', ready).replace('{selected}', selected.length);
+  if (missing) {
+    message += ` · ${(t('settings.splitRoutingCacheMissing') || '{count} selected list(s) still need a successful download')
+      .replace('{count}', missing)}`;
+  }
+  showMsg('split-routing-status', message, missing === 0);
+}
+
+async function saveSplitRouting() {
+  const btn = document.querySelector('[data-action="save-split-routing"]');
+  if (btn) btn.disabled = true;
+  try {
+    const lists = [...document.querySelectorAll('[data-routing-list]:checked')]
+      .map(input => input.dataset.routingList);
+    const customDomains = (el('s-split-routing-custom')?.value || '').split(/[\n,]+/)
+      .map(domain => domain.trim()).filter(Boolean);
+    const splitRouting = {
+      lists,
+      customDomains,
+    };
+    const saved = await api('POST', '/api/config', { splitRouting });
+    state.config = { ...state.config, ...(saved.cfg || {}), splitRouting };
+    await loadRoutingListsStatus();
+    toast(t('settings.splitRoutingSaved') || 'Routing settings saved', 'success');
+    if (lists.length) await refreshRoutingLists();
+  } catch (err) {
+    showMsg('split-routing-status', err.message || 'Failed to save routing settings', false);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function refreshRoutingLists() {
+  const btn = document.querySelector('[data-action="refresh-routing-lists"]');
+  if (btn) btn.disabled = true;
+  try {
+    showMsg('split-routing-status', t('settings.splitRoutingRefreshing') || 'Downloading selected lists…', true);
+    const result = await api('POST', '/api/routing-lists/refresh');
+    state.config = await api('GET', '/api/config');
+    await loadRoutingListsStatus();
+    const failures = (result.results || []).filter(item => !item.ok);
+    if (failures.length) {
+      const details = failures.map(item =>
+        `${item.id}: ${item.error}${item.usingCached ? ' (cached copy kept)' : ''}`).join('; ');
+      showMsg('split-routing-status', `${t('settings.splitRoutingPartial') || 'Some lists could not be refreshed'}: ${details}`, false);
+    } else {
+      showMsg('split-routing-status', t('settings.splitRoutingRefreshed') || 'Selected lists refreshed ✓', true);
+    }
+  } catch (err) {
+    showMsg('split-routing-status', err.message || 'Failed to refresh lists', false);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -1258,6 +1359,10 @@ async function loadSettings() {
     el('s-mtu').value         = cfg.mtu || 1400;
     const subBaseEl = el('s-sub-base-url');
     if (subBaseEl) subBaseEl.value = cfg.subBaseUrl || '';
+    const splitRouting = cfg.splitRouting || { lists: [], customDomains: [] };
+    const splitCustomEl = el('s-split-routing-custom');
+    if (splitCustomEl) splitCustomEl.value = (splitRouting.customDomains || []).join('\n');
+    await loadRoutingListsStatus();
     const flagEl = el('s-server-flag');
     if (flagEl) flagEl.value = cfg.serverFlag || '';   // v1.9.4
     const fakeSiteEl = el('s-fake-site-url');

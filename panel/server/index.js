@@ -37,6 +37,10 @@ const path           = require('path');
 const { execSync, execFileSync } = require('child_process');
 const si             = require('systeminformation');
 const crypto         = require('crypto');   // Bug 100: module-level require so generateSafePassword() has a real Node crypto (not Web-Crypto globalThis.crypto, which lacks randomInt)
+const {
+  createRoutingListStore,
+  normalizeSplitRoutingConfig,
+} = require('./routingLists');
 
 // ── Paths ─────────────────────────────────────────────────────────────────────
 const PANEL_CONFIG    = '/etc/rixxx-panel/config.json';
@@ -108,6 +112,9 @@ try {
     //    so a down peer never breaks a subscription.
     federationToken: '',
     federationNodes: [],
+    // Shared domain-list policy. Per-user domain_routing controls whether a
+    // Karing profile applies these lists or sends all traffic through proxy.
+    splitRouting: { lists: [], customDomains: [] },
     // Cascade (relay): Naive uses Caddyfile upstream; Mieru uses Variant B
     // (redsocks+iptables+mieru-client) orchestrated by scripts/cascade_mieru.sh.
     cascadeEnabled: false, cascadeNaiveUpstream: '',
@@ -138,6 +145,18 @@ if (!cfg.stack || typeof cfg.stack !== 'object') {
 if (cfg.stack.naive === undefined) cfg.stack.naive = true;
 if (cfg.stack.mieru === undefined) cfg.stack.mieru = true;
 if (cfg.stack.hy2   === undefined) cfg.stack.hy2   = false;
+
+// Backfill and normalize split-routing settings from older config.json files.
+// A malformed saved value is ignored so a bad optional feature setting cannot
+// prevent the management panel from starting.
+try {
+  cfg.splitRouting = normalizeSplitRoutingConfig(cfg.splitRouting || {
+    lists: [], customDomains: []
+  });
+} catch (e) {
+  console.warn('[ROUTING] invalid splitRouting config ignored:', e && e.message);
+  cfg.splitRouting = { lists: [], customDomains: [] };
+}
 
 // Bug 143 (recurring): single source of truth for the displayed version.
 // Precedence, read LIVE so the UI updates the moment update.sh runs:
@@ -176,6 +195,23 @@ const resolvedCaddyFile = cfg.caddyFile     || CADDY_FILE;
 const resolvedCaddyBin  = cfg.caddyBin      || CADDY_BIN;
 const resolvedCaddyCfgDir = cfg.caddyConfigDir || CADDY_CONFIG_DIR;
 const resolvedFakeSiteDir = cfg.fakeSiteDir  || FAKE_SITE_DIR;
+const ROUTING_LIST_CACHE_DIR = process.env.PANEL_ROUTING_CACHE_DIR ||
+  path.join(path.dirname(resolvedDb), 'routing-lists');
+const routingListStore = createRoutingListStore({ cacheDir: ROUTING_LIST_CACHE_DIR });
+
+async function refreshConfiguredRoutingLists(reason = 'scheduled refresh') {
+  const split = cfg.splitRouting || {};
+  if (!Array.isArray(split.lists) || split.lists.length === 0) return [];
+  const results = await routingListStore.refreshMany(split.lists);
+  for (const result of results) {
+    if (!result.ok) {
+      console.warn(`[ROUTING] ${reason}: ${result.id} update failed; ${result.usingCached ? 'keeping cached copy' : 'no cached copy available'}: ${result.error}`);
+    } else {
+      console.log(`[ROUTING] ${reason}: ${result.id} refreshed (${result.count} domains)`);
+    }
+  }
+  return results;
+}
 
 // ── SQLite (better-sqlite3) ───────────────────────────────────────────────────
 let db = null;
@@ -195,6 +231,7 @@ try {
       protocols TEXT DEFAULT '["naive","mieru"]',
       quotaMB   INTEGER DEFAULT 0,
       usedMB    REAL    DEFAULT 0,
+      domain_routing INTEGER NOT NULL DEFAULT 0,
       createdAt TEXT NOT NULL,
       updatedAt TEXT NOT NULL,
       lastSeen  TEXT
@@ -242,6 +279,10 @@ try {
   // do NOT touch the DB file perms/owner here (stays 600 root:root).
   try { db.exec(`ALTER TABLE users ADD COLUMN bonus_links TEXT`); } catch {}
 
+  // Per-user Karing split routing is opt-in. Existing and newly created users
+  // default to the full-proxy route until an admin enables the checkbox.
+  try { db.exec(`ALTER TABLE users ADD COLUMN domain_routing INTEGER NOT NULL DEFAULT 0`); } catch {}
+
   // Migrate: make `email` nullable so it can be optional (TLS cert is set at
   // install time via Caddy ACME, not per-user). Old schema had `email TEXT
   // NOT NULL UNIQUE`, which rejects empty/absent emails and collides on ''.
@@ -263,16 +304,17 @@ try {
           protocols TEXT DEFAULT '["naive","mieru"]',
           quotaMB   INTEGER DEFAULT 0,
           usedMB    REAL    DEFAULT 0,
+          domain_routing INTEGER NOT NULL DEFAULT 0,
           createdAt TEXT NOT NULL,
           updatedAt TEXT NOT NULL,
           lastSeen  TEXT
         );
         INSERT INTO users
-          (id,email,username,passHash,password,expiry,protocols,quotaMB,usedMB,createdAt,updatedAt,lastSeen)
+          (id,email,username,passHash,password,expiry,protocols,quotaMB,usedMB,domain_routing,createdAt,updatedAt,lastSeen)
         SELECT
           id,
           CASE WHEN email='' THEN NULL ELSE email END,
-          username,passHash,password,expiry,protocols,quotaMB,usedMB,createdAt,updatedAt,lastSeen
+          username,passHash,password,expiry,protocols,quotaMB,usedMB,domain_routing,createdAt,updatedAt,lastSeen
         FROM users_legacy;
         DROP TABLE users_legacy;
         COMMIT;
@@ -365,17 +407,19 @@ function upsertUser(u) {
     const email = (u.email && String(u.email).trim()) ? String(u.email).trim() : null;
     db.prepare(`
       INSERT INTO users
-        (id,email,username,passHash,password,expiry,protocols,quotaMB,usedMB,createdAt,updatedAt,lastSeen,sub_token)
+        (id,email,username,passHash,password,expiry,protocols,quotaMB,usedMB,domain_routing,createdAt,updatedAt,lastSeen,sub_token)
       VALUES
-        (@id,@email,@username,@passHash,@password,@expiry,@protocols,@quotaMB,@usedMB,@createdAt,@updatedAt,@lastSeen,@sub_token)
+        (@id,@email,@username,@passHash,@password,@expiry,@protocols,@quotaMB,@usedMB,@domain_routing,@createdAt,@updatedAt,@lastSeen,@sub_token)
       ON CONFLICT(id) DO UPDATE SET
         email=excluded.email, username=excluded.username,
         passHash=excluded.passHash, password=excluded.password,
         expiry=excluded.expiry, protocols=excluded.protocols,
         quotaMB=excluded.quotaMB, usedMB=excluded.usedMB,
+        domain_routing=excluded.domain_routing,
         updatedAt=excluded.updatedAt, lastSeen=excluded.lastSeen,
         sub_token=COALESCE(excluded.sub_token, users.sub_token)
     `).run({ ...u, email, password: u.password || '',
+             domain_routing: u.domain_routing === true || Number(u.domain_routing) === 1 ? 1 : 0,
              sub_token: u.sub_token || crypto.randomBytes(16).toString('hex') });
   } else {
     memUsers.set(u.id, u);
@@ -403,11 +447,12 @@ function createUserAtomic(u) {
   if (db) {
     const info = db.prepare(`
       INSERT INTO users
-        (id,email,username,passHash,password,expiry,protocols,quotaMB,usedMB,createdAt,updatedAt,lastSeen,sub_token)
+        (id,email,username,passHash,password,expiry,protocols,quotaMB,usedMB,domain_routing,createdAt,updatedAt,lastSeen,sub_token)
       VALUES
-        (@id,@email,@username,@passHash,@password,@expiry,@protocols,@quotaMB,@usedMB,@createdAt,@updatedAt,@lastSeen,@sub_token)
+        (@id,@email,@username,@passHash,@password,@expiry,@protocols,@quotaMB,@usedMB,@domain_routing,@createdAt,@updatedAt,@lastSeen,@sub_token)
       ON CONFLICT(username) DO NOTHING
     `).run({ ...u, email, password: u.password || '',
+             domain_routing: u.domain_routing === true || Number(u.domain_routing) === 1 ? 1 : 0,
              sub_token: u.sub_token || crypto.randomBytes(16).toString('hex') });
 
     if (info.changes === 1)
@@ -1847,6 +1892,12 @@ app.post('/api/config', requireAuth, (req, res) => {
   const prevFake    = cfg.fakeSiteUrl || '';   // v1.9.3: watch the masquerade URL too
   const prevFedNodes = Array.isArray(cfg.federationNodes) ? cfg.federationNodes : []; // v1.9.5
 
+  let normalizedSplitRouting;
+  if (req.body.splitRouting !== undefined) {
+    try { normalizedSplitRouting = normalizeSplitRoutingConfig(req.body.splitRouting); }
+    catch (e) { return res.status(400).json({ error: e.message }); }
+  }
+
   // v1.9.3: validate fakeSiteUrl BEFORE mutating cfg, so a bad value can never
   // be persisted or fed to buildCaddyfile(). Empty string is allowed (= reset
   // to the built-in default fake site). Non-empty must be a plain http(s) URL.
@@ -1882,6 +1933,9 @@ app.post('/api/config', requireAuth, (req, res) => {
    'federationToken','federationNodes'].forEach(k => {
     if (req.body[k] !== undefined) cfg[k] = req.body[k];
   });
+  const prevSplitRouting = JSON.stringify(cfg.splitRouting || {});
+  if (normalizedSplitRouting) cfg.splitRouting = normalizedSplitRouting;
+  const splitRoutingChanged = prevSplitRouting !== JSON.stringify(cfg.splitRouting || {});
   // v1.9.5: normalize federationToken (trim; empty allowed = node role off).
   if (typeof cfg.federationToken === 'string') {
     cfg.federationToken = cfg.federationToken.trim();
@@ -1925,6 +1979,13 @@ app.post('/api/config', requireAuth, (req, res) => {
     cfg.fakeSiteUrl = cfg.fakeSiteUrl.trim().replace(/\/+$/, '');
   }
   saveConfig();
+
+  // Refresh newly selected source lists in the background. The config save and
+  // all existing APIs stay fast; profiles keep using the previous good cache
+  // until each replacement list has passed validation.
+  if (splitRoutingChanged && cfg.splitRouting) {
+    setImmediate(() => refreshConfiguredRoutingLists('settings update'));
+  }
 
   // v1.8.7 + v1.9.3: rebuild the Caddyfile if EITHER the sub domain OR the
   // masquerade (fake-site) URL changed. subBaseUrl affects the sub.<domain>
@@ -1979,6 +2040,25 @@ app.post('/api/config', requireAuth, (req, res) => {
   res.json({ ok: true, cfg: safe });
 });
 
+app.get('/api/routing-lists/status', requireAuth, (req, res) => {
+  const split = cfg.splitRouting || {};
+  res.json({
+    source: 'itdoginfo/allow-domains',
+    configured: (split.lists || []).length > 0 || (split.customDomains || []).length > 0,
+    lists: routingListStore.getStatus(split.lists || [], cfg.language || 'ru'),
+  });
+});
+
+app.post('/api/routing-lists/refresh', requireAuth, async (_req, res) => {
+  const split = cfg.splitRouting || {};
+  const results = await routingListStore.refreshMany(split.lists || []);
+  res.json({
+    ok: results.every(result => result.ok),
+    results,
+    lists: routingListStore.getStatus(split.lists || [], cfg.language || 'ru'),
+  });
+});
+
 app.post('/api/config/password', requireAuth, (req, res) => {
   const { current, newPass } = req.body;
   if (!current || !newPass) return res.status(400).json({ error: 'Missing fields' });
@@ -2021,6 +2101,7 @@ app.get('/api/backup/export', requireAuth, (req, res) => {
       protocols: u.protocols || '["naive","mieru"]',
       quotaMB:   u.quotaMB || 0,
       usedMB:    u.usedMB || 0,
+      domainRouting: u.domain_routing === true || Number(u.domain_routing) === 1,
       createdAt: u.createdAt,
       updatedAt: u.updatedAt,
       lastSeen:  u.lastSeen || null
@@ -2114,6 +2195,7 @@ app.post('/api/backup/import', requireAuth, (req, res) => {
         protocols: u.protocols || '["naive","mieru"]',
         quotaMB:   u.quotaMB || 0,
         usedMB:    u.usedMB || 0,
+        domain_routing: u.domainRouting === true ? 1 : 0,
         createdAt: u.createdAt || new Date().toISOString(),
         updatedAt: new Date().toISOString(),
         lastSeen:  u.lastSeen || null
@@ -2482,6 +2564,7 @@ function validateUserInput({ email, username, password, protocols, quotaMB, quot
 function parseUserRow(u) {
   return {
     ...u,
+    domainRouting: u.domain_routing === true || Number(u.domain_routing) === 1,
     protocols: typeof u.protocols === 'string'
       ? (() => { try { return JSON.parse(u.protocols); } catch { return []; } })()
       : (u.protocols || []),
@@ -2541,7 +2624,9 @@ app.get('/api/apply-status', requireAuth, (req, res) => {
 });
 
 app.post('/api/users', requireAuth, async (req, res) => {
-  const { email, username, password, expiry, protocols, quotaMB, quotaGb } = req.body;
+  const { email, username, password, expiry, protocols, quotaMB, quotaGb, domainRouting } = req.body;
+  if (domainRouting !== undefined && typeof domainRouting !== 'boolean')
+    return res.status(400).json({ error: 'domainRouting must be a boolean' });
   const validation = validateUserInput(
     { email, username, password, protocols, quotaMB, quotaGb }, true);
   if (validation.error)
@@ -2622,6 +2707,7 @@ app.post('/api/users', requireAuth, async (req, res) => {
       protocols: JSON.stringify(validation.protocols),
       quotaMB:   validation.quotaMB,
       usedMB:    0,
+      domain_routing: domainRouting === true ? 1 : 0,
       // v1.8.7: mint a random subscription token (128-bit hex) up-front so the
       // /sub/:token link works the instant the user is created.
       sub_token: crypto.randomBytes(16).toString('hex'),
@@ -2668,7 +2754,9 @@ app.put('/api/users/:id', requireAuth, (req, res) => {
   const user = getUserById(req.params.id);
   if (!user) return res.status(404).json({ error: 'User not found' });
 
-  const { email, username, password, expiry, protocols, quotaMB, quotaGb } = req.body;
+  const { email, username, password, expiry, protocols, quotaMB, quotaGb, domainRouting } = req.body;
+  if (domainRouting !== undefined && typeof domainRouting !== 'boolean')
+    return res.status(400).json({ error: 'domainRouting must be a boolean' });
   const validation = validateUserInput(
     { email: email ?? user.email,
       username: username ?? user.username,
@@ -2708,6 +2796,9 @@ app.put('/api/users/:id', requireAuth, (req, res) => {
     quotaMB:   (quotaMB !== undefined || quotaGb !== undefined)
       ? validation.quotaMB
       : user.quotaMB,
+    domain_routing: domainRouting !== undefined
+      ? (domainRouting ? 1 : 0)
+      : (user.domain_routing === true || Number(user.domain_routing) === 1 ? 1 : 0),
     updatedAt: new Date().toISOString()
   };
   if (password) {
@@ -3899,6 +3990,7 @@ function buildProxyOutbounds(user, opts = {}) {
   const protos   = parseUserRow(user).protocols || [];
   const password = opts.password || user.password || 'YOUR_PASSWORD';
   const suffix   = opts.tagSuffix || '';
+  const onlyProtocol = String(opts.protocol || '').trim().toLowerCase();
 
   const _ps = parseInt(cfg.mieruPortStart, 10) || 2000;
   const _pe = parseInt(cfg.mieruPortEnd,   10) || 2010;
@@ -3914,7 +4006,7 @@ function buildProxyOutbounds(user, opts = {}) {
   // "naive-out"/"mieru-out"/"hy2-out" as before (byte-identical for old installs).
   const tagFor = base => applyServerFlag(base) + suffix;
 
-  if (protos.includes('naive')) {
+  if ((!onlyProtocol || onlyProtocol === 'naive') && protos.includes('naive')) {
     const tag = tagFor('naive-out');
     selectTags.push(tag);
     proxyOutbounds.push({
@@ -3925,7 +4017,7 @@ function buildProxyOutbounds(user, opts = {}) {
       tls: { enabled: true, server_name: cfg.domain }
     });
   }
-  if (protos.includes('mieru')) {
+  if ((!onlyProtocol || onlyProtocol === 'mieru') && protos.includes('mieru')) {
     const tag = tagFor('mieru-out');
     selectTags.push(tag);
     proxyOutbounds.push({
@@ -3937,7 +4029,7 @@ function buildProxyOutbounds(user, opts = {}) {
       multiplexing: 'MULTIPLEXING_HIGH'
     });
   }
-  if (protos.includes('hy2') && cfg.stack && cfg.stack.hy2) {
+  if ((!onlyProtocol || onlyProtocol === 'hy2') && protos.includes('hy2') && cfg.stack && cfg.stack.hy2) {
     const tag = tagFor('hy2-out');
     selectTags.push(tag);
     proxyOutbounds.push({
@@ -3949,7 +4041,7 @@ function buildProxyOutbounds(user, opts = {}) {
   }
 
   // Personal bonus links → sing-box outbounds (unparseable ones skipped).
-  const bonusUrls = enabledBonusUrls(user);
+  const bonusUrls = onlyProtocol ? [] : enabledBonusUrls(user);
   for (let i = 0; i < bonusUrls.length; i++) {
     const ob = bonusUrlToSingboxOutbound(bonusUrls[i], `bonus-${i + 1}${suffix}`);
     if (ob) { proxyOutbounds.push(ob); selectTags.push(ob.tag); }
@@ -3963,7 +4055,7 @@ function buildSingboxConfig(user, opts = {}) {
   // buildProxyOutbounds() helper (so the federation endpoint emits IDENTICAL
   // outbounds). No tagSuffix here ⇒ tags are byte-identical to old installs.
   const { proxyOutbounds, selectTags } = buildProxyOutbounds(user, {
-    password: opts.password, port: opts.port
+    password: opts.password, port: opts.port, protocol: opts.protocol
   });
 
   // Fallback: if the user somehow has no proxy protocols enabled, keep the
@@ -3983,6 +4075,25 @@ function buildSingboxConfig(user, opts = {}) {
   outbounds.push({ type: 'direct', tag: 'direct' });
   outbounds.push({ type: 'dns',    tag: 'dns-out' });
 
+  const splitRouting = parseUserRow(user).domainRouting === true;
+  const splitDomains = splitRouting
+    ? [...new Set([
+        ...routingListStore.getDomains(cfg.splitRouting.lists),
+        ...(Array.isArray(cfg.splitRouting.customDomains) ? cfg.splitRouting.customDomains : []),
+      ])].sort()
+    : [];
+  const selectedListStatuses = splitRouting
+    ? routingListStore.getStatus(cfg.splitRouting.lists || []).filter(item => item.selected)
+    : [];
+  const splitRoutingReady = splitRouting && splitDomains.length > 0 &&
+    selectedListStatuses.every(item => item.available);
+  const routeRules = [{ protocol: 'dns', outbound: 'dns-out' }];
+  // Explicit domain-list matches use the proxy. Every other destination is
+  // direct only for users who opted in; users without routing keep full proxy.
+  if (splitDomains.length) {
+    routeRules.push({ domain_suffix: splitDomains, outbound: hasProxies ? 'select' : 'direct' });
+  }
+
   return {
     log: { level: 'info', timestamp: true },
     dns: {
@@ -3995,12 +4106,11 @@ function buildSingboxConfig(user, opts = {}) {
     },
     outbounds,
     route: {
-      rules: [
-        { protocol: 'dns', outbound: 'dns-out' },
-        { geoip: 'cn',     outbound: 'direct'  },
-        { geosite: 'cn',   outbound: 'direct'  }
-      ],
-      final: hasProxies ? 'select' : 'direct',
+      rules: routeRules,
+      // Until every selected source list has a local good copy, keep the full
+      // proxy route. This prevents an initial download failure from silently
+      // sending destinations directly through the client's ISP.
+      final: splitRoutingReady ? 'direct' : (hasProxies ? 'select' : 'direct'),
       auto_detect_interface: true
     }
   };
@@ -4729,7 +4839,20 @@ app.get('/sub/:token', subLimiter, async (req, res) => {
   const user = getUserBySubToken(req.params.token);
   if (!user) return res.status(404).type('text/plain').send('Not found');
 
-  const client = detectSubClient(req);
+  const protocolFilter = String(req.query.protocol || '').trim().toLowerCase();
+  if (protocolFilter && !['naive', 'mieru', 'hy2'].includes(protocolFilter)) {
+    return res.status(400).json({ error: 'protocol must be naive, mieru, or hy2' });
+  }
+  if (protocolFilter) {
+    const enabled = parseUserRow(user).protocols || [];
+    if (!enabled.includes(protocolFilter) ||
+        (protocolFilter === 'hy2' && !(cfg.stack && cfg.stack.hy2))) {
+      return res.status(409).json({ error: `User does not have the ${protocolFilter} protocol enabled` });
+    }
+  }
+  // A protocol-scoped subscription is always emitted as a Karing/sing-box JSON
+  // profile so it can still carry the panel's split-routing rules.
+  const client = protocolFilter ? 'karing' : detectSubClient(req);
   res.setHeader('Profile-Update-Interval', '24');
   res.setHeader('Subscription-Userinfo', buildSubUserinfo(user));
   // A friendly profile title shown by most clients.
@@ -4738,7 +4861,7 @@ app.get('/sub/:token', subLimiter, async (req, res) => {
 
   if (client === 'karing') {
     // sing-box JSON (Mieru works here as a JSON outbound).
-    const singbox = buildSingboxConfig(user, { port: req.query.port });
+    const singbox = buildSingboxConfig(user, { port: req.query.port, protocol: protocolFilter });
     // v1.9.8 FIX (federation into sing-box clients): fold in configs from peer
     // nodes for the SAME user (by email) as READY sing-box outbounds. Previously
     // we pulled the peer's URI list and translated each URI back into an
@@ -4798,8 +4921,18 @@ app.get('/api/users/:id/sub-link', requireAuth, (req, res) => {
   if (!user) return res.status(404).json({ error: 'User not found' });
   const token = user.sub_token;
   if (!token) return res.status(409).json({ error: 'User has no subscription token' });
+  const protocol = String(req.query.protocol || '').trim().toLowerCase();
+  if (protocol && !['naive', 'mieru', 'hy2'].includes(protocol))
+    return res.status(400).json({ error: 'protocol must be naive, mieru, or hy2' });
+  if (protocol) {
+    const enabled = parseUserRow(user).protocols || [];
+    if (!enabled.includes(protocol) || (protocol === 'hy2' && !(cfg.stack && cfg.stack.hy2)))
+      return res.status(409).json({ error: `User does not have the ${protocol} protocol enabled` });
+  }
   const base = subBaseUrl();
-  const link = `${base}/sub/${token}`;
+  const profileParams = new URLSearchParams({ client: 'karing' });
+  if (protocol) profileParams.set('protocol', protocol);
+  const link = `${base}/sub/${token}?${profileParams.toString()}`;
   res.json({ link, token, base, username: user.username });
 });
 
@@ -5437,6 +5570,13 @@ wss.on('connection', ws => {
 });
 
 // ── Expiry cron — every 5 min ─────────────────────────────────────────────────
+// allow-domains publishes source list changes weekly. Refresh the lists selected
+// by the admin daily; the store retains the last good cache on every failure.
+cron.schedule('23 4 * * *', () => {
+  refreshConfiguredRoutingLists('daily refresh').catch(e =>
+    console.warn('[ROUTING] daily refresh failed:', e && e.message));
+}, { timezone: 'UTC' });
+
 cron.schedule('*/5 * * * *', () => {
   const now = new Date().toISOString();
   let changed = false;
@@ -5539,6 +5679,8 @@ server.listen(PORT, HOST, () => {
     ''
   ];
   lines.forEach(l => console.log(l));
+  refreshConfiguredRoutingLists('startup').catch(e =>
+    console.warn('[ROUTING] startup refresh failed:', e && e.message));
 });
 
 module.exports = app;

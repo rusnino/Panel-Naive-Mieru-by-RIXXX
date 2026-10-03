@@ -231,6 +231,18 @@ Contains all enabled protocols (NaiveProxy + Mieru + Hysteria2) with `urltest` s
 
 ---
 
+## 🧭 Karing domain-list routing
+
+Choose domain lists and optional custom domains in **Settings → Karing split routing**. Then enable **Route by domain lists** in the relevant user's settings, below quota and protocols. In that user's profile, selected domains use the proxy and everything else uses the device's direct internet connection. Without the checkbox, all Karing traffic for that user uses the proxy.
+
+- The panel checks selected domain lists from [`itdoginfo/allow-domains`](https://github.com/itdoginfo/allow-domains) daily, validates them, and keeps the last good cache. You can also add custom domains.
+- The Karing profile contains the domains in its normal subscription response. The user adds one universal link; the client does not fetch lists separately. The config dialog can also create a Karing profile limited to Naive, Mieru, or Hy2.
+- If a selected source has not downloaded yet and no cached copy exists, the profile temporarily sends all traffic through the proxy. Selected domains are not silently sent directly while the cache is missing.
+- `Russia inside` lists resources blocked or restricted when accessed from Russia. `Russia outside` lists Russian services that require a Russian exit IP; the proxy server itself must have a Russian exit IP for those services.
+- Routing rules are delivered in the Karing/sing-box JSON profile. Native Naive/Mieru/Hy2 URI links do not carry domain lists or split-routing rules.
+
+---
+
 ## 🌐 Cascade / Relay (v1.2.6)
 
 Configure a two-hop chain directly from the panel (**Settings → Cascade**):
